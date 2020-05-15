@@ -1,0 +1,72 @@
+---
+- name: "Firstboot check"
+  shell: |
+    if [ -e "/opt/.firstboot" ]
+    then
+      echo "true"
+    else
+      echo "false"
+    fi
+  register: firstbootcheck
+
+- name: "First boot configuration block"
+  block:
+    - name: "Set up /etc/hosts file and hostname"
+      shell: |
+        shortname=$(hostname --short)
+        hostname=${shortname}.{{ dns_domain }}
+        echo "${hostname}" > /etc/hostname
+        hostnamectl set-hostname ${hostname}
+        grep "{{ ansible_default_ipv4['address'] }}" /etc/hosts || echo "{{ ansible_default_ipv4['address'] }} ${hostname} ${shortname}" >> /etc/hosts
+      become: true
+      args:
+        creates: /opt/.firstboot
+
+    - name: "Set ntp server"
+      set_fact:
+        ntp_server: "0.rhel.pool.ntp.org"
+
+    - name: "Set ntp to true"
+      shell: |
+        ntpdate server {{ ntp_server }} iburst
+        timedatectl set-ntp true
+        systemctl restart chronyd
+      poll: 0
+      async: 1
+      become: true
+      ignore_errors: yes
+      args:
+        creates: /opt/.firstboot
+    
+    - name: "Updating MOTD"
+      template: 
+        src: ibm-logo.ascii.j2
+        dest: /etc/motd 
+        owner: root 
+        group: root 
+        mode: 0644
+
+    - name: "first boot complete"
+      file:
+        path: /opt/.firstboot
+        state: touch
+        mode: 0444
+
+    - name: "Reboot."
+      shell: |
+        shutdown -r +1 || true
+      become: true
+      args:
+        executable: /bin/bash
+        creates: /opt/.firstboot
+
+    - name: "Wait 5 to 11 mins for host to reboot"
+      wait_for:
+        port: 22
+        host: "{{ ansible_ssh_host | default(inventory_hostname) }}"
+        #search_regex: OpenSSH
+        delay: 120
+        timeout: 660
+      delegate_to: localhost
+      become: false
+  when: firstbootcheck.stdout == "false"
